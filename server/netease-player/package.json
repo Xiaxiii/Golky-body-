@@ -1,6 +1,6 @@
 {
   "name": "netease-player",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "SillyTavern server plugin: NetEase Cloud Music API for the in-page player",
   "private": true,
   "type": "module",

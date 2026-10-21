@@ -258,6 +258,28 @@ const check = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${msg}`); 
   vis = await page.evaluate(() => ({ bar: !!document.querySelector('#nep-bar:not([hidden])'), float: !!document.querySelector('#nep-float:not([hidden])') }));
   check(!vis.bar && !vis.float, `刷新页面后设置仍然生效: ${JSON.stringify(vis)}`);
 
+  // ---------- 大歌单：分批渲染、滑到底自动加载下一页 ----------
+  setPlaylistVersion(498); // 500 首
+  await page.click('#extensionsMenuButton');
+  await page.click('#nep-menu-item');
+  await page.waitForSelector('#nep-panel:not([hidden])');
+  await page.click('#nep-panel .nep-tabs button[data-tab=playlists]');
+  await page.waitForFunction(() => document.querySelector('#nep-panel .nep-row[data-act=open-playlist] .nep-row-sub')?.textContent.startsWith('500 首'), null, { timeout: 5000 });
+  await page.click('#nep-panel [data-act=open-playlist]');
+  await page.waitForFunction(() => document.querySelectorAll('#nep-panel .nep-row').length > 0 && !document.querySelector('#nep-panel .nep-list-foot').textContent.includes('加载中'), null, { timeout: 5000 });
+  const firstRows = await page.$$eval('#nep-panel .nep-row', e => e.length);
+  check(firstRows <= 60, `打开 500 首的歌单只先画 ${firstRows} 行`);
+  for (let k = 0; k < 60; k++) {
+    await page.evaluate(() => { const b = document.querySelector('#nep-panel .nep-body'); b.scrollTop = b.scrollHeight; });
+    await sleep(100);
+    if (await page.$$eval('#nep-panel .nep-row', e => e.length) === 500) break;
+  }
+  const bigEnd = await page.evaluate(() => { const r = document.querySelectorAll('#nep-panel .nep-row'); return { rows: r.length, last: r[r.length - 1].querySelector('.nep-row-title').textContent, more: !!document.querySelector('#nep-panel .nep-more'), refresh: document.querySelector('[data-act=refresh-playlist]').disabled }; });
+  check(bigEnd.rows === 500 && bigEnd.last === '测试歌曲 499' && !bigEnd.more && !bigEnd.refresh, `滑到底自动加载完 500 首: ${JSON.stringify(bigEnd)}`);
+  await page.click('#nep-panel .nep-row[data-i="450"] .nep-row-main');
+  await page.waitForFunction(() => document.getElementById('nep-audio').src.includes('song1450'), null, { timeout: 10000 });
+  check(true, '点第 451 首（后面批次里画出来的行）能播放');
+
   check(pageErrors.length === 0, `页面没有报错 ${JSON.stringify(pageErrors)}`);
   console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
   await browser.close();

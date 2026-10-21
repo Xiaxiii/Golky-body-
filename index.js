@@ -365,10 +365,14 @@ function togglePanel() {
 
 // ---------- 常驻入口：迷你播放条 / 悬浮按钮 ----------
 
+// 不用 backdrop-filter：iPhone 上固定在聊天记录上方的毛玻璃，每滑一帧都要重新模糊，整页会卡。
+// 改用主题色的不透明版本（不支持相对颜色语法的浏览器退回原主题色）。
+const SOLID_BG = 'background:var(--SmartThemeBlurTintColor);background:rgb(from var(--SmartThemeBlurTintColor) r g b)';
+
 const CSS = `
 #nep-bar{display:flex;align-items:center;gap:4px;width:100%;box-sizing:border-box;margin:0 0 2px;padding:2px 6px;
-border:1px solid var(--SmartThemeBorderColor);border-radius:10px;background:var(--SmartThemeBlurTintColor);
-color:var(--SmartThemeBodyColor);backdrop-filter:blur(var(--SmartThemeBlurStrength,0));font-size:0.9em;white-space:nowrap}
+border:1px solid var(--SmartThemeBorderColor);border-radius:10px;${SOLID_BG};
+color:var(--SmartThemeBodyColor);font-size:0.9em;white-space:nowrap}
 #nep-bar[hidden],#nep-float[hidden]{display:none}
 #nep-bar .nep-info{flex:1;min-width:0;overflow:hidden;line-height:1.25;padding:2px 0;cursor:pointer}
 #nep-bar .nep-title,#nep-bar .nep-sub,#nep-float .nep-title,#nep-float .nep-sub{overflow:hidden;text-overflow:ellipsis}
@@ -380,8 +384,8 @@ font-size:1.05em;cursor:pointer;-webkit-tap-highlight-color:transparent}
 #nep-bar .nep-resume{width:auto;padding:0 10px;border:1px solid var(--SmartThemeBorderColor);font-size:.9em}
 #nep-float{position:fixed;z-index:2910;left:0;top:0;display:flex;align-items:center;gap:2px;max-width:min(210px,62vw);
 box-sizing:border-box;padding:3px 3px 3px 10px;border:1px solid var(--SmartThemeBorderColor);border-radius:22px;
-background:var(--SmartThemeBlurTintColor);backdrop-filter:blur(calc(var(--SmartThemeBlurStrength,0px) + 6px));
-color:var(--SmartThemeBodyColor);box-shadow:0 3px 12px rgba(0,0,0,.3);font-size:.85em;white-space:nowrap;
+${SOLID_BG};color:var(--SmartThemeBodyColor);box-shadow:0 2px 8px rgba(0,0,0,.3);font-size:.85em;white-space:nowrap;
+will-change:transform;contain:layout style;
 touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 #nep-float.nep-dragging{opacity:.75}
 #nep-float .nep-info{display:flex;align-items:center;gap:7px;min-width:0;line-height:1.2;cursor:pointer}
@@ -453,18 +457,37 @@ function createFloat() {
     el.querySelector('.nep-play').addEventListener('click', withEngine(e => e.toggle()));
     el.querySelector('.nep-info').addEventListener('click', togglePanel);
     bindDrag(el);
-    window.addEventListener('resize', () => placeFloat(el));
+    // iOS 滑动时地址栏收起也会触发 resize，合并到下一帧只算一次
+    let resizeFrame = 0;
+    window.addEventListener('resize', () => {
+        if (resizeFrame) return;
+        resizeFrame = requestAnimationFrame(() => {
+            resizeFrame = 0;
+            placeFloat(el);
+        });
+    });
     return el;
 }
 
-/** 位置按「可移动范围里的比例」保存，转屏或窗口变化后还在同一侧。 */
-function placeFloat(el, pos = store.get(KEYS.floatPos) || FLOAT_DEFAULT_POS) {
+let floatPos = null;
+
+function savedFloatPos() {
+    floatPos ??= store.get(KEYS.floatPos) || FLOAT_DEFAULT_POS;
+    return floatPos;
+}
+
+/**
+ * 位置按「可移动范围里的比例」保存，转屏或窗口变化后还在同一侧。
+ * 用 transform 移动：不触发页面重排，按钮自己一个图层。
+ */
+function placeFloat(el, pos = savedFloatPos()) {
     if (el.hidden) return;
     const maxX = Math.max(0, window.innerWidth - el.offsetWidth - FLOAT_MARGIN * 2);
     const maxY = Math.max(0, window.innerHeight - el.offsetHeight - FLOAT_MARGIN * 2);
     const clamp = (v) => Math.min(1, Math.max(0, Number(v) || 0));
-    el.style.left = `${FLOAT_MARGIN + clamp(pos.x) * maxX}px`;
-    el.style.top = `${FLOAT_MARGIN + clamp(pos.y) * maxY}px`;
+    const x = Math.round(FLOAT_MARGIN + clamp(pos.x) * maxX);
+    const y = Math.round(FLOAT_MARGIN + clamp(pos.y) * maxY);
+    el.style.transform = `translate3d(${x}px,${y}px,0)`;
 }
 
 function moveFloat(el, left, top) {
@@ -478,6 +501,7 @@ function moveFloat(el, left, top) {
 
 export function resetFloatPosition() {
     store.remove(KEYS.floatPos);
+    floatPos = null;
     if (miniBar.float) placeFloat(miniBar.float);
 }
 
@@ -510,7 +534,10 @@ function bindDrag(el) {
         window.removeEventListener('pointercancel', onEnd);
         if (dragged) {
             el.classList.remove('nep-dragging');
-            if (pos) store.set(KEYS.floatPos, pos);
+            if (pos) {
+                floatPos = pos;
+                store.set(KEYS.floatPos, pos);
+            }
         }
     };
     el.addEventListener('pointerdown', (e) => {
@@ -575,13 +602,21 @@ export const miniBar = {
 
     render() {
         const genLabel = gen.label;
+        let floatResized = false;
         for (const el of [this.bar, this.float]) {
             if (!el || el.hidden) continue;
             const isFloat = el === this.float;
-            el.querySelector('.nep-title').textContent = this.title || '网易云音乐';
-            const sub = el.querySelector('.nep-sub');
+            const title = this.title || '网易云音乐';
             const note = isFloat && this.needTap ? '点 ▶ 继续播放' : this.note;
-            sub.textContent = genLabel || note || this.artist || (isFloat ? '点这里展开' : '点歌名展开');
+            const subText = genLabel || note || this.artist || (isFloat ? '点这里展开' : '点歌名展开');
+            const titleEl = el.querySelector('.nep-title');
+            const sub = el.querySelector('.nep-sub');
+            // 文字没变就不碰 DOM
+            if (titleEl.textContent !== title || sub.textContent !== subText) {
+                titleEl.textContent = title;
+                sub.textContent = subText;
+                if (isFloat) floatResized = true;
+            }
             sub.classList.toggle('nep-gen', !!genLabel);
             const play = el.querySelector('.nep-play');
             play.classList.toggle('fa-play', !this.playing);
@@ -589,9 +624,10 @@ export const miniBar = {
             const resume = el.querySelector('.nep-resume');
             if (resume) resume.hidden = !this.needTap;
         }
-        // 文字变长变短后宽度会变，重新贴边，免得超出屏幕
-        if (this.float && !this.float.hidden && !this.float.classList.contains('nep-dragging')) {
-            placeFloat(this.float);
+        // 文字变了宽度会变，重新贴边，免得超出屏幕；刚显示出来时也要摆一次
+        const float = this.float;
+        if (float && !float.hidden && (floatResized || !float.style.transform) && !float.classList.contains('nep-dragging')) {
+            placeFloat(float);
         }
     },
 };

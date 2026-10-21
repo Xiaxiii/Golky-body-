@@ -6,8 +6,9 @@ const CSS = `
 #nep-panel{position:fixed;z-index:2900;left:max(6px,env(safe-area-inset-left));right:max(6px,env(safe-area-inset-right));
 top:calc(var(--topBarBlockSize,50px) + env(safe-area-inset-top) + 4px);height:min(68dvh,620px);max-width:640px;margin:0 auto;
 display:flex;flex-direction:column;box-sizing:border-box;border:1px solid var(--SmartThemeBorderColor);border-radius:12px;
-background:var(--SmartThemeBlurTintColor);backdrop-filter:blur(calc(var(--SmartThemeBlurStrength,0px) + 8px));
-color:var(--SmartThemeBodyColor);box-shadow:0 6px 24px rgba(0,0,0,.35);font-size:15px;white-space:normal;overflow:hidden}
+background:var(--SmartThemeBlurTintColor);background:rgb(from var(--SmartThemeBlurTintColor) r g b);
+color:var(--SmartThemeBodyColor);box-shadow:0 6px 24px rgba(0,0,0,.35);font-size:15px;white-space:normal;overflow:hidden;
+contain:layout style}
 #nep-panel[hidden]{display:none}
 #nep-panel *{box-sizing:border-box}
 #nep-panel button:not(.fa-solid){font:inherit}
@@ -29,7 +30,7 @@ border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:6px 8px;
 .nep-tabs{display:flex;border-top:1px solid var(--SmartThemeBorderColor);border-bottom:1px solid var(--SmartThemeBorderColor)}
 .nep-tabs button{flex:1;border:0!important;border-radius:0!important;padding:9px 0!important;opacity:.65}
 .nep-tabs button.nep-active{opacity:1;box-shadow:inset 0 -2px 0 var(--SmartThemeQuoteColor)}
-.nep-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}
+.nep-body{flex:1;min-height:0;contain:content;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}
 .nep-row{display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid color-mix(in srgb,var(--SmartThemeBorderColor) 60%,transparent);cursor:pointer}
 .nep-row:last-child{border-bottom:0}
 .nep-row.nep-current{color:var(--SmartThemeQuoteColor)}
@@ -46,6 +47,7 @@ border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:6px 8px;
 .nep-section{margin:4px 0 14px}
 .nep-section h4{margin:0 0 6px;font-size:.95em}
 .nep-check{display:flex;gap:8px;align-items:center;margin:8px 0}
+.nep-more{height:1px}
 .nep-log{font-size:.78em;line-height:1.5;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;opacity:.85;max-height:260px;overflow:auto}
 `;
 
@@ -86,6 +88,76 @@ function badges(t) {
     if (t.st < 0) html += '<span class="nep-badge">无版权</span>';
     else if (t.fee === 1) html += '<span class="nep-badge">VIP</span>';
     return html;
+}
+
+// ---------- 长列表分批渲染：先画 LIST_STEP 行，滑到底附近再接着画 ----------
+
+const LIST_STEP = 60;
+let list = null; // { key, items, row, shown }
+let moreObserver = null;
+
+/**
+ * 只渲染前一批行，后面放一个占位元素，滚到附近时 showMore() 再追加。
+ * 同一个 key 重新渲染时保留已经显示的行数，避免滚动位置跳回去。
+ */
+function lazyList(key, items, row, { hasMore = null, loadMore = null } = {}) {
+    const prevShown = list?.key === key ? list.shown : 0;
+    const shown = Math.min(items.length, Math.max(LIST_STEP, prevShown));
+    list = { key, items, row, shown, hasMore, loadMore };
+    let html = '';
+    for (let i = 0; i < shown; i++) html += row(items[i], i);
+    if (needMore()) html += '<div class="nep-more"></div>';
+    return html;
+}
+
+/** 还有没画出来的行，或者服务端还有下一页。 */
+function needMore() {
+    return !!list && (list.shown < list.items.length || !!list.hasMore?.());
+}
+
+function watchMore() {
+    const el = body.querySelector('.nep-more');
+    moreObserver?.disconnect();
+    if (!el) return;
+    moreObserver ??= new IntersectionObserver((entries) => {
+        if (entries.some(e => e.isIntersecting)) showMore();
+    }, { root: body, rootMargin: '0px 0px 600px 0px' });
+    moreObserver.observe(el);
+}
+
+function showMore() {
+    const el = body.querySelector('.nep-more');
+    if (!el || !list) return;
+    if (list.shown >= list.items.length) {
+        // 已经画到底：去拉下一页，拉回来后 syncMore() 再接着画
+        moreObserver.unobserve(el);
+        if (list.hasMore?.()) list.loadMore?.();
+        else el.remove();
+        return;
+    }
+    const from = list.shown;
+    list.shown = Math.min(list.items.length, from + LIST_STEP);
+    let html = '';
+    for (let i = from; i < list.shown; i++) html += list.row(list.items[i], i);
+    el.insertAdjacentHTML('beforebegin', html);
+    moreObserver.unobserve(el);
+    if (needMore()) {
+        // 重新观察：占位元素还在可见范围里时会马上再触发一次
+        moreObserver.observe(el);
+    } else {
+        el.remove();
+    }
+}
+
+/** 列表数据变多（拉到了下一页）后，补上占位元素并重新观察，不重画已有的行。 */
+function syncMore() {
+    const el = body.querySelector('.nep-more');
+    if (needMore() && !el) {
+        body.querySelector('.nep-list-foot')?.insertAdjacentHTML('beforebegin', '<div class="nep-more"></div>');
+    } else if (!needMore() && el) {
+        el.remove();
+    }
+    watchMore();
 }
 
 function trackRow(t, i, { current = false, extra = '' } = {}) {
@@ -189,6 +261,7 @@ export function close() {
 
 function switchTab(tab) {
     state.tab = tab;
+    list = null;
     for (const b of root.querySelectorAll('.nep-tabs button')) {
         b.classList.toggle('nep-active', b.dataset.tab === tab);
     }
@@ -238,6 +311,7 @@ function renderBody() {
     if (!body) return;
     const render = { search: renderSearch, playlists: renderPlaylists, queue: renderQueue, settings: renderSettings }[state.tab];
     body.innerHTML = render();
+    watchMore();
 }
 
 function renderSearch() {
@@ -249,9 +323,9 @@ function renderSearch() {
     if (!s.tracks.length && !s.loading && !s.error) {
         html += '<div class="nep-hint">点一首歌：插到当前歌曲后面并立刻播放。点右边的 ＋：加到队列末尾。</div>';
     }
-    html += s.tracks.map((t, i) => trackRow(t, i, {
+    html += lazyList('search', s.tracks, (t, i) => trackRow(t, i, {
         extra: `<button type="button" class="nep-icon fa-solid fa-plus" data-act="enqueue" data-i="${i}" title="加到队列"></button>`,
-    })).join('');
+    }));
     if (s.loading) html += '<div class="nep-hint">搜索中…</div>';
     else if (s.hasMore) html += '<button type="button" data-act="search-more" style="width:100%;margin-top:8px">加载更多</button>';
     return html;
@@ -267,10 +341,10 @@ function renderPlaylists() {
     const head = `<div class="nep-bar"><div class="nep-hint" style="flex:1;margin:0">${state.playlists.length} 个歌单</div>
         ${refreshButton('refresh-playlists')}</div>`;
     if (!state.playlists.length) return `${head}<div class="nep-hint">没有歌单</div>`;
-    return head + state.playlists.map((p, i) => `<div class="nep-row" data-act="open-playlist" data-i="${i}">
+    return head + lazyList('playlists', state.playlists, (p, i) => `<div class="nep-row" data-act="open-playlist" data-i="${i}">
         ${p.cover ? `<img loading="lazy" src="${esc(p.cover)}?param=80y80" alt="">` : '<img alt="">'}
         <div class="nep-row-main"><div class="nep-row-title">${esc(p.name)}</div>
-        <div class="nep-row-sub">${p.count} 首${p.mine ? '' : ' · 收藏'}</div></div></div>`).join('');
+        <div class="nep-row-sub">${p.count} 首${p.mine ? '' : ' · 收藏'}</div></div></div>`);
 }
 
 function renderPlaylistTracks() {
@@ -281,11 +355,36 @@ function renderPlaylistTracks() {
         ${refreshButton('refresh-playlist')}</div>
         <div class="nep-bar"><button type="button" data-act="play-all" style="flex:1">▶ 播放全部</button>
         <button type="button" data-act="shuffle-all" style="flex:1">随机播放</button></div>`;
-    if (pl.error) html += `<div class="nep-error">${esc(pl.error)}</div>`;
-    html += pl.tracks.map((t, i) => trackRow(t, i)).join('');
+    html += lazyList(`pl:${pl.meta.id}`, pl.tracks, (t, i) => trackRow(t, i), {
+        // 滑到底自动拉下一页；出错后停下，等手动点「加载更多」
+        hasMore: () => pl.hasMore && !pl.error,
+        loadMore: () => loadPlaylistPage(),
+    });
+    return `${html}<div class="nep-list-foot">${playlistFoot(pl)}</div>`;
+}
+
+function playlistFoot(pl) {
+    let html = pl.error ? `<div class="nep-error">${esc(pl.error)}</div>` : '';
     if (pl.loading) html += '<div class="nep-hint">加载中…</div>';
     else if (pl.hasMore) html += '<button type="button" data-act="playlist-more" style="width:100%;margin-top:8px">加载更多</button>';
     return html;
+}
+
+/**
+ * 歌单页的「加载中/加载更多」和新拉到的歌只做局部更新，不重画整个列表。
+ * 歌单页没在显示（或换了歌单）就什么都不做，下次切过去会整体渲染。
+ */
+function updatePlaylistView(pl) {
+    if (state.tab !== 'playlists' || state.playlist !== pl || root.hidden) return;
+    const foot = body.querySelector('.nep-list-foot');
+    if (!foot || list?.key !== `pl:${pl.meta.id}` || list.items !== pl.tracks) {
+        renderBody();
+        return;
+    }
+    foot.innerHTML = playlistFoot(pl);
+    const refresh = body.querySelector('[data-act=refresh-playlist]');
+    if (refresh) refresh.outerHTML = refreshButton('refresh-playlist');
+    syncMore();
 }
 
 function refreshButton(act) {
@@ -298,18 +397,17 @@ function renderQueue() {
     const s = engine.getState();
     if (!s.queue.length) return '<div class="nep-hint">队列是空的。</div>';
     const start = Math.max(0, s.index - 30);
-    const end = Math.min(s.queue.length, start + 300);
     let html = `<div class="nep-hint">共 ${s.queue.length} 首${s.source?.hasMore ? '（歌单剩下的会自动接上）' : ''}。点歌名播放，点 × 移出队列。</div>`;
     if (start > 0) html += `<div class="nep-hint">…前面还有 ${start} 首</div>`;
-    for (let i = start; i < end; i++) {
+    html += lazyList('queue', s.queue.slice(start), (t, k) => {
+        const i = start + k;
         const current = i === s.index;
-        html += trackRow(s.queue[i], i, {
+        return trackRow(t, i, {
             current,
             extra: current ? '<span class="fa-solid fa-volume-high" style="padding:0 12px"></span>'
                 : `<button type="button" class="nep-icon fa-solid fa-xmark" data-act="remove" data-i="${i}" title="移出队列"></button>`,
         });
-    }
-    if (end < s.queue.length) html += `<div class="nep-hint">…后面还有 ${s.queue.length - end} 首</div>`;
+    });
     return html;
 }
 
@@ -422,9 +520,15 @@ async function loadPlaylists({ fresh = false, quiet = false, reloadOpen = false 
     try {
         const data = await api('playlists', fresh ? { fresh: true } : {});
         if (fresh) playlistsCheckedAt = Date.now();
+        const unchanged = quiet && !state.playlistsError && JSON.stringify(state.playlists) === JSON.stringify(data.playlists);
         state.playlistsError = '';
         applyPlaylists(data.playlists, reloadOpen);
         ok = true;
+        if (unchanged) {
+            // 后台检查没发现变化：不重画，免得大歌单白白重排一遍
+            state.playlistsLoading = false;
+            return ok;
+        }
     } catch (error) {
         if (!quiet || (!state.playlists && state.tab === 'playlists')) {
             state.playlistsError = error.needLogin ? '需要先登录网易云（在「账号/设置」里扫码）' : error.message;
@@ -465,7 +569,8 @@ async function loadPlaylistPage() {
     if (!pl || pl.loading) return;
     pl.loading = true;
     pl.error = '';
-    renderBody();
+    if (pl.tracks.length) updatePlaylistView(pl);
+    else if (state.tab === 'playlists') renderBody();
     try {
         const fresh = pl.fresh && !pl.tracks.length;
         const data = await api('playlist/tracks', { id: pl.meta.id, offset: pl.tracks.length, limit: 200, ...(fresh ? { fresh: true } : {}) });
@@ -476,7 +581,7 @@ async function loadPlaylistPage() {
         pl.error = error.message;
     }
     pl.loading = false;
-    if (state.tab === 'playlists') renderBody();
+    updatePlaylistView(pl);
 }
 
 function playlistSource(pl) {

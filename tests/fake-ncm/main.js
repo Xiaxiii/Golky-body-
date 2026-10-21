@@ -6,7 +6,8 @@ const rec = (name) => (q) => { calls.push({ name, q }); require('fs').appendFile
 let qrChecks = 0;
 // 歌单版本：测试往 NEP_FAKE_STATE 文件里写 1/2/3，「我喜欢的音乐」就有 3/4/5 首，模拟在网易云 App 里加了歌
 const plVersion = () => { try { return Number(require('fs').readFileSync(process.env.NEP_FAKE_STATE || '', 'utf8').trim()) || 1; } catch { return 1; } };
-const plSongs = () => [song(11, 'A'), song(12, 'B'), song(13, 'C'), song(14, 'D'), song(15, 'E')].slice(0, 2 + plVersion());
+// 写大数字（比如 2000）可以模拟大歌单，用来测性能
+const plSongs = () => { const base = [song(11, 'A'), song(12, 'B'), song(13, 'C'), song(14, 'D'), song(15, 'E')]; return Array.from({ length: 2 + plVersion() }, (_, i) => base[i] || song(1000 + i, '测试歌曲 ' + i)); };
 module.exports = {
   cloudsearch: async (q) => { rec('cloudsearch')(q); return { body: { code: 200, result: { songCount: 2, songs: [song(1, '晴天'), song(2, 'VIP歌', 1)] } } }; },
   login_qr_key: async (q) => { rec('login_qr_key')(q); return { body: { code: 200, data: { unikey: 'abc-123' } } }; },
