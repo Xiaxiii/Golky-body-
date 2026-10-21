@@ -96,6 +96,7 @@ export function removeAt(i) {
     history = [];
     resetPrefetch();
     saveQueue();
+    savePosition(true);
     emit();
     if (current) schedulePrefetch();
 }
@@ -217,7 +218,7 @@ async function startIndex(i, { startAt = 0, reason = '' } = {}) {
     savedPosition = startAt;
     retriedCurrent = false;
     current = null;
-    saveQueue();
+    // 只记当前是第几首（写在 now 里），不重写整个队列：大歌单的队列有几百 KB
     savePosition(true, track, startAt);
     miniBar.set({ title: track.name, artist: track.ar, needTap: false, note: '' });
     updateMetadata(track);
@@ -588,6 +589,11 @@ function restore() {
         state.source = saved.source || null;
     }
     const now = store.get(KEYS.now);
+    // 切歌时只更新 now，所以当前第几首以 now 为准
+    const nowIndex = Number(now?.index);
+    if (now && Number.isInteger(nowIndex) && state.queue[nowIndex]?.id === now.id) {
+        state.index = nowIndex;
+    }
     if (now && state.queue[state.index]?.id === now.id) {
         savedPosition = Number(now.position) || 0;
     }
