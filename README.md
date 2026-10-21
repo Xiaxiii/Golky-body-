@@ -10,8 +10,8 @@
 
 ## 安装
 
-按 [INSTALL.md](INSTALL.md) 的 7 段命令，在阿里云 Workbench 里依次整段粘贴，每段最后一行出现 `OK` 再做下一段。
-卸载命令也在 INSTALL.md 最后。
+按 [INSTALL.md](INSTALL.md) 的命令，在阿里云 Workbench 的 **Shell** 模式里依次整段粘贴（Agent 模式会把粘贴的内容交给 AI 改写，长命令会被截断），每段出现 `OK` 再做下一段。
+文件内容切成了每段 5KB 左右的小段，每段单独校验。卸载命令也在 INSTALL.md 最后。
 
 ## 使用说明
 

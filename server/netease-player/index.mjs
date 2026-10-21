@@ -277,7 +277,7 @@ export async function init(router) {
         return await getSongUrl(id, level, ctxOf(req));
     });
 
-    console.log('[netease-player] 已加载，接口包会在第一次使用时才载入。');
+    console.log('[netease-player] loaded（接口包会在第一次使用时才载入）');
 }
 
 export async function exit() {
