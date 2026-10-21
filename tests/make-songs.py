@@ -3,7 +3,7 @@ import math
 import struct
 import wave
 
-for i in [1, 11, 12, 13, 99]:
+for i in [1, 11, 12, 13, 14, 15, 99]:
     w = wave.open(f'song{i}.wav', 'wb')
     w.setnchannels(1)
     w.setsampwidth(2)

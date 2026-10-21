@@ -110,11 +110,14 @@ function cacheSet(key, value, ttlMs) {
     cache.set(key, { value, expires: Date.now() + ttlMs });
 }
 
-function cacheClearUser(req) {
-    const prefix = `${userHandle(req)}:`;
+function cacheClearPrefix(prefix) {
     for (const key of [...cache.keys()]) {
         if (key.startsWith(prefix)) cache.delete(key);
     }
+}
+
+function cacheClearUser(req) {
+    cacheClearPrefix(`${userHandle(req)}:`);
 }
 
 // ---------- 路由 ----------
@@ -235,11 +238,13 @@ export async function init(router) {
         return { tracks: songs.map(s => mapTrack(s)), total, hasMore: offset + songs.length < total };
     });
 
-    route(router, '/playlists', async (req) => {
+    // fresh: true 时跳过缓存直接问网易云，并清掉这个用户所有歌单曲目的缓存
+    route(router, '/playlists', async (req, body) => {
         const account = await fetchAccount(req);
         if (!account) throw needLogin();
         const key = `${userHandle(req)}:playlists`;
-        let list = cacheGet(key);
+        if (body.fresh) cacheClearPrefix(`${userHandle(req)}:pl:`);
+        let list = body.fresh ? undefined : cacheGet(key);
         if (!list) {
             const result = await callNcm('user_playlist', { uid: account.uid, limit: 200, offset: 0 }, ctxOf(req));
             list = (result?.playlist || []).map(p => ({
@@ -249,6 +254,7 @@ export async function init(router) {
                 count: p.trackCount || 0,
                 liked: p.specialType === 5,
                 mine: p.creator?.userId === account.uid,
+                updated: p.trackUpdateTime || p.updateTime || 0,
             }));
             cacheSet(key, list, 2 * 60 * 1000);
         }
@@ -260,7 +266,9 @@ export async function init(router) {
         const limit = toInt(body.limit, 200, 1, 500);
         const offset = toInt(body.offset, 0, 0, 100000);
         const key = `${userHandle(req)}:pl:${id}:${offset}:${limit}`;
-        let page = cacheGet(key);
+        // 从头重新拉时，后面几页的缓存也作废
+        if (body.fresh && offset === 0) cacheClearPrefix(`${userHandle(req)}:pl:${id}:`);
+        let page = body.fresh ? undefined : cacheGet(key);
         if (!page) {
             const result = await callNcm('playlist_track_all', { id, limit, offset }, ctxOf(req));
             const privileges = new Map((result?.privileges || []).map(p => [p.id, p]));

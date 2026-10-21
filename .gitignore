@@ -1,3 +1,7 @@
 node_modules/
-server/netease-player/data/
 *.tgz
+# 服务端插件的运行数据（网易云登录 cookie 就在这里），任何位置都不提交
+data/
+cookie-*.json
+# 端到端测试的截图（可能拍到二维码和昵称）
+tests/*.png

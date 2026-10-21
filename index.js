@@ -1,5 +1,5 @@
 // 网易云播放器 —— 启动时只运行这个文件：注册菜单项、监听生成事件、
-// 有上次的播放记录时显示迷你播放条。不发任何网络请求。
+// 显示常驻入口（悬浮按钮或迷你播放条）。不发任何网络请求。
 // 播放逻辑（engine.js）和界面（panel.js）在用户点开后才加载。
 
 const API_BASE = '/api/plugins/netease-player/';
@@ -8,12 +8,14 @@ const KEYS = {
     queue: 'nep:v1:queue',
     settings: 'nep:v1:settings',
     log: 'nep:v1:log',
+    floatPos: 'nep:v1:float-pos',
 };
 const DEFAULT_SETTINGS = {
     skipTrial: true,
     statusMinutes: 3,
     autoResume: true,
     level: 'standard',
+    entry: 'float', // float 悬浮按钮 | bar 输入框上方的迷你播放条 | off 只从魔法棒菜单打开
 };
 
 // ---------- localStorage（读写都可能抛错） ----------
@@ -339,90 +341,231 @@ function reportLoadError(error) {
     globalThis.toastr?.error(`播放器加载失败：${error?.message || error}`);
 }
 
+let panelModule = null;
+
 export async function openPanel() {
     miniBar.show();
     try {
         const panel = await loadPanel();
+        panelModule = panel;
         panel.open();
     } catch (error) {
         reportLoadError(error);
     }
 }
 
-// ---------- 迷你播放条 ----------
+/** 悬浮按钮上点歌名：面板开着就收起，否则展开。 */
+function togglePanel() {
+    if (panelModule?.isOpen()) {
+        panelModule.close();
+    } else {
+        openPanel();
+    }
+}
+
+// ---------- 常驻入口：迷你播放条 / 悬浮按钮 ----------
 
 const CSS = `
 #nep-bar{display:flex;align-items:center;gap:4px;width:100%;box-sizing:border-box;margin:0 0 2px;padding:2px 6px;
 border:1px solid var(--SmartThemeBorderColor);border-radius:10px;background:var(--SmartThemeBlurTintColor);
 color:var(--SmartThemeBodyColor);backdrop-filter:blur(var(--SmartThemeBlurStrength,0));font-size:0.9em;white-space:nowrap}
-#nep-bar[hidden]{display:none}
+#nep-bar[hidden],#nep-float[hidden]{display:none}
 #nep-bar .nep-info{flex:1;min-width:0;overflow:hidden;line-height:1.25;padding:2px 0;cursor:pointer}
-#nep-bar .nep-title,#nep-bar .nep-sub{overflow:hidden;text-overflow:ellipsis}
-#nep-bar .nep-sub{opacity:.7;font-size:.85em}
-#nep-bar .nep-sub.nep-gen{opacity:1;color:var(--SmartThemeQuoteColor)}
-#nep-bar button{flex:none;width:36px;height:34px;border:0;border-radius:8px;background:transparent;color:inherit;
+#nep-bar .nep-title,#nep-bar .nep-sub,#nep-float .nep-title,#nep-float .nep-sub{overflow:hidden;text-overflow:ellipsis}
+#nep-bar .nep-sub,#nep-float .nep-sub{opacity:.7;font-size:.85em}
+#nep-bar .nep-sub.nep-gen,#nep-float .nep-sub.nep-gen{opacity:1;color:var(--SmartThemeQuoteColor)}
+#nep-bar button,#nep-float button{flex:none;width:36px;height:34px;border:0;border-radius:8px;background:transparent;color:inherit;
 font-size:1.05em;cursor:pointer;-webkit-tap-highlight-color:transparent}
-#nep-bar button:active{background:var(--SmartThemeBorderColor)}
+#nep-bar button:active,#nep-float button:active{background:var(--SmartThemeBorderColor)}
 #nep-bar .nep-resume{width:auto;padding:0 10px;border:1px solid var(--SmartThemeBorderColor);font-size:.9em}
+#nep-float{position:fixed;z-index:2910;left:0;top:0;display:flex;align-items:center;gap:2px;max-width:min(210px,62vw);
+box-sizing:border-box;padding:3px 3px 3px 10px;border:1px solid var(--SmartThemeBorderColor);border-radius:22px;
+background:var(--SmartThemeBlurTintColor);backdrop-filter:blur(calc(var(--SmartThemeBlurStrength,0px) + 6px));
+color:var(--SmartThemeBodyColor);box-shadow:0 3px 12px rgba(0,0,0,.3);font-size:.85em;white-space:nowrap;
+touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#nep-float.nep-dragging{opacity:.75}
+#nep-float .nep-info{display:flex;align-items:center;gap:7px;min-width:0;line-height:1.2;cursor:pointer}
+#nep-float .nep-note{flex:none;opacity:.8}
+#nep-float .nep-text{min-width:0;max-width:9.5em}
+#nep-float button{width:34px;height:34px;border-radius:50%}
 `;
 
+const FLOAT_MARGIN = 4;
+// 默认贴右边、在展开面板下方、输入框上方
+const FLOAT_DEFAULT_POS = { x: 1, y: 0.85 };
+
+// 播放类按钮：播放逻辑已加载就同步调用（保持在用户手势里）；
+// 没加载时先同步解锁音频，再去加载
+const withEngine = (fn) => () => {
+    if (engineModule) {
+        fn(engineModule);
+        return;
+    }
+    unlock();
+    loadEngine().then(fn).catch(reportLoadError);
+};
+
+function injectStyle() {
+    if (document.getElementById('nep-style')) return;
+    const style = document.createElement('style');
+    style.id = 'nep-style';
+    style.textContent = CSS;
+    document.head.appendChild(style);
+}
+
+function createBar() {
+    injectStyle();
+    const el = document.createElement('div');
+    el.id = 'nep-bar';
+    el.hidden = true;
+    el.innerHTML = `
+        <div class="nep-info" title="展开播放器"><div class="nep-title"></div><div class="nep-sub"></div></div>
+        <button type="button" class="nep-resume" hidden>继续播放</button>
+        <button type="button" class="nep-play fa-solid fa-play" title="播放/暂停"></button>
+        <button type="button" class="nep-next fa-solid fa-forward-step" title="下一首"></button>
+        <button type="button" class="nep-open fa-solid fa-chevron-up" title="展开"></button>`;
+    const form = document.getElementById('send_form');
+    if (form?.parentElement) {
+        form.parentElement.insertBefore(el, form);
+    } else {
+        document.body.appendChild(el);
+    }
+    el.querySelector('.nep-play').addEventListener('click', withEngine(e => e.toggle()));
+    el.querySelector('.nep-resume').addEventListener('click', withEngine(e => e.resume()));
+    el.querySelector('.nep-next').addEventListener('click', withEngine(e => e.next()));
+    el.querySelector('.nep-open').addEventListener('click', () => openPanel());
+    el.querySelector('.nep-info').addEventListener('click', () => openPanel());
+    return el;
+}
+
+function createFloat() {
+    injectStyle();
+    const el = document.createElement('div');
+    el.id = 'nep-float';
+    el.hidden = true;
+    el.innerHTML = `
+        <div class="nep-info" title="展开/收起播放器（按住可拖动）">
+            <span class="nep-note fa-solid fa-music"></span>
+            <div class="nep-text"><div class="nep-title"></div><div class="nep-sub"></div></div>
+        </div>
+        <button type="button" class="nep-play fa-solid fa-play" title="播放/暂停"></button>`;
+    document.body.appendChild(el);
+    el.querySelector('.nep-play').addEventListener('click', withEngine(e => e.toggle()));
+    el.querySelector('.nep-info').addEventListener('click', togglePanel);
+    bindDrag(el);
+    window.addEventListener('resize', () => placeFloat(el));
+    return el;
+}
+
+/** 位置按「可移动范围里的比例」保存，转屏或窗口变化后还在同一侧。 */
+function placeFloat(el, pos = store.get(KEYS.floatPos) || FLOAT_DEFAULT_POS) {
+    if (el.hidden) return;
+    const maxX = Math.max(0, window.innerWidth - el.offsetWidth - FLOAT_MARGIN * 2);
+    const maxY = Math.max(0, window.innerHeight - el.offsetHeight - FLOAT_MARGIN * 2);
+    const clamp = (v) => Math.min(1, Math.max(0, Number(v) || 0));
+    el.style.left = `${FLOAT_MARGIN + clamp(pos.x) * maxX}px`;
+    el.style.top = `${FLOAT_MARGIN + clamp(pos.y) * maxY}px`;
+}
+
+function moveFloat(el, left, top) {
+    const maxX = Math.max(0, window.innerWidth - el.offsetWidth - FLOAT_MARGIN * 2);
+    const maxY = Math.max(0, window.innerHeight - el.offsetHeight - FLOAT_MARGIN * 2);
+    const x = maxX ? Math.min(1, Math.max(0, (left - FLOAT_MARGIN) / maxX)) : 0;
+    const y = maxY ? Math.min(1, Math.max(0, (top - FLOAT_MARGIN) / maxY)) : 0;
+    placeFloat(el, { x, y });
+    return { x, y };
+}
+
+export function resetFloatPosition() {
+    store.remove(KEYS.floatPos);
+    if (miniBar.float) placeFloat(miniBar.float);
+}
+
+/**
+ * 按住移动超过几像素算拖动；拖动结束后吞掉随之而来的那次点击。
+ * 移动和抬起在 window 上监听：鼠标移出按钮后按钮本身收不到事件。
+ * 不用 setPointerCapture，否则点击会落到外层而不是播放键上。
+ */
+function bindDrag(el) {
+    let start = null;
+    let dragged = false;
+    let pos = null;
+    const onMove = (e) => {
+        if (!start || e.pointerId !== start.id) return;
+        const dx = e.clientX - start.x;
+        const dy = e.clientY - start.y;
+        if (!dragged) {
+            if (Math.hypot(dx, dy) < 8) return;
+            dragged = true;
+            el.classList.add('nep-dragging');
+        }
+        e.preventDefault();
+        pos = moveFloat(el, start.left + dx, start.top + dy);
+    };
+    const onEnd = (e) => {
+        if (!start || e.pointerId !== start.id) return;
+        start = null;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onEnd);
+        window.removeEventListener('pointercancel', onEnd);
+        if (dragged) {
+            el.classList.remove('nep-dragging');
+            if (pos) store.set(KEYS.floatPos, pos);
+        }
+    };
+    el.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        start = { id: e.pointerId, x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+        dragged = false;
+        pos = null;
+        window.addEventListener('pointermove', onMove, { passive: false });
+        window.addEventListener('pointerup', onEnd);
+        window.addEventListener('pointercancel', onEnd);
+    });
+    el.addEventListener('click', (e) => {
+        if (!dragged) return;
+        dragged = false;
+        e.preventDefault();
+        e.stopPropagation();
+    }, true);
+}
+
+/**
+ * 迷你播放条和悬浮按钮共用一份状态（engine.js 只调 set/show/hide）。
+ * - entry=float：一直显示悬浮按钮，不显示迷你播放条
+ * - entry=bar：一直显示迷你播放条
+ * - entry=off：和最早一样，打开过播放器或有播放记录时才显示迷你播放条
+ */
 export const miniBar = {
-    el: null,
+    bar: null,
+    float: null,
+    active: false,
     title: '',
     artist: '',
     playing: false,
     needTap: false,
     note: '',
 
-    ensure() {
-        if (this.el) return this.el;
-        const style = document.createElement('style');
-        style.id = 'nep-style';
-        style.textContent = CSS;
-        document.head.appendChild(style);
-
-        const el = document.createElement('div');
-        el.id = 'nep-bar';
-        el.hidden = true;
-        el.innerHTML = `
-            <div class="nep-info" title="展开播放器"><div class="nep-title"></div><div class="nep-sub"></div></div>
-            <button type="button" class="nep-resume" hidden>继续播放</button>
-            <button type="button" class="nep-play fa-solid fa-play" title="播放/暂停"></button>
-            <button type="button" class="nep-next fa-solid fa-forward-step" title="下一首"></button>
-            <button type="button" class="nep-open fa-solid fa-chevron-up" title="展开"></button>`;
-        const form = document.getElementById('send_form');
-        if (form?.parentElement) {
-            form.parentElement.insertBefore(el, form);
-        } else {
-            document.body.appendChild(el);
-        }
-
-        // 播放类按钮：播放逻辑已加载就同步调用（保持在用户手势里）；
-        // 没加载时先同步解锁音频，再去加载
-        const withEngine = (fn) => () => {
-            if (engineModule) {
-                fn(engineModule);
-                return;
-            }
-            unlock();
-            loadEngine().then(fn).catch(reportLoadError);
-        };
-        el.querySelector('.nep-play').addEventListener('click', withEngine(e => e.toggle()));
-        el.querySelector('.nep-resume').addEventListener('click', withEngine(e => e.resume()));
-        el.querySelector('.nep-next').addEventListener('click', withEngine(e => e.next()));
-        el.querySelector('.nep-open').addEventListener('click', () => openPanel());
-        el.querySelector('.nep-info').addEventListener('click', () => openPanel());
-        this.el = el;
-        return el;
-    },
-
     show() {
-        this.ensure().hidden = false;
-        this.render();
+        this.active = true;
+        this.apply();
     },
 
     hide() {
-        if (this.el) this.el.hidden = true;
+        this.active = false;
+        this.apply();
+    },
+
+    /** 按设置决定显示哪个入口；改了设置后也调用这个。 */
+    apply() {
+        const showBar = settings.entry === 'bar' || (settings.entry === 'off' && this.active);
+        const showFloat = settings.entry === 'float';
+        if (showBar && !this.bar) this.bar = createBar();
+        if (showFloat && !this.float) this.float = createFloat();
+        if (this.bar) this.bar.hidden = !showBar;
+        if (this.float) this.float.hidden = !showFloat;
+        this.render();
     },
 
     set(patch) {
@@ -431,16 +574,25 @@ export const miniBar = {
     },
 
     render() {
-        if (!this.el || this.el.hidden) return;
-        this.el.querySelector('.nep-title').textContent = this.title || '网易云音乐';
-        const sub = this.el.querySelector('.nep-sub');
         const genLabel = gen.label;
-        sub.textContent = genLabel || this.note || this.artist || '点歌名展开';
-        sub.classList.toggle('nep-gen', !!genLabel);
-        const play = this.el.querySelector('.nep-play');
-        play.classList.toggle('fa-play', !this.playing);
-        play.classList.toggle('fa-pause', this.playing);
-        this.el.querySelector('.nep-resume').hidden = !this.needTap;
+        for (const el of [this.bar, this.float]) {
+            if (!el || el.hidden) continue;
+            const isFloat = el === this.float;
+            el.querySelector('.nep-title').textContent = this.title || '网易云音乐';
+            const sub = el.querySelector('.nep-sub');
+            const note = isFloat && this.needTap ? '点 ▶ 继续播放' : this.note;
+            sub.textContent = genLabel || note || this.artist || (isFloat ? '点这里展开' : '点歌名展开');
+            sub.classList.toggle('nep-gen', !!genLabel);
+            const play = el.querySelector('.nep-play');
+            play.classList.toggle('fa-play', !this.playing);
+            play.classList.toggle('fa-pause', this.playing);
+            const resume = el.querySelector('.nep-resume');
+            if (resume) resume.hidden = !this.needTap;
+        }
+        // 文字变长变短后宽度会变，重新贴边，免得超出屏幕
+        if (this.float && !this.float.hidden && !this.float.classList.contains('nep-dragging')) {
+            placeFloat(this.float);
+        }
     },
 };
 
@@ -468,6 +620,14 @@ function restoreMiniBar() {
     miniBar.show();
 }
 
-addMenuItem();
-bindGenerationEvents();
-restoreMiniBar();
+// 手动装过一份、又用「安装扩展」装了一份时，只让先加载的那份运行
+if (globalThis.__neteasePlayerLoaded) {
+    console.warn('[netease-player] 检测到重复安装，这一份不启动');
+    globalThis.toastr?.warning('网易云播放器装了两份，请在扩展管理里删掉其中一份', '', { timeOut: 10000 });
+} else {
+    globalThis.__neteasePlayerLoaded = true;
+    addMenuItem();
+    bindGenerationEvents();
+    restoreMiniBar();
+    miniBar.apply();
+}
