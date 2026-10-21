@@ -1,5 +1,5 @@
 // 展开面板：搜索、我的歌单、播放队列、账号与设置。点开播放器时才加载。
-import { api, settings, saveSettings, getLog, clearLog, gen } from './index.js';
+import { api, settings, saveSettings, getLog, clearLog, gen, miniBar, resetFloatPosition } from './index.js';
 import * as engine from './engine.js';
 
 const CSS = `
@@ -54,6 +54,7 @@ const state = {
     search: { keywords: '', tracks: [], hasMore: false, offset: 0, loading: false, error: '' },
     playlists: null,
     playlistsError: '',
+    playlistsLoading: false,
     playlist: null, // { meta, tracks, hasMore, loading, error }
     account: null,
     accountError: '',
@@ -66,6 +67,10 @@ let unsubscribe = null;
 let qrTimer = null;
 let progressTimer = null;
 let seeking = false;
+let playlistsCheckedAt = 0;
+
+// 打开面板时自动检查歌单更新，短时间内反复开关只查一次
+const AUTO_CHECK_INTERVAL = 10 * 1000;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
 
@@ -166,6 +171,11 @@ export function open() {
     renderNow();
     switchTab(state.tab);
     if (!state.account && !state.accountError) refreshAccount();
+    autoCheckPlaylists();
+}
+
+export function isOpen() {
+    return !!root && !root.hidden;
 }
 
 export function close() {
@@ -182,7 +192,7 @@ function switchTab(tab) {
     for (const b of root.querySelectorAll('.nep-tabs button')) {
         b.classList.toggle('nep-active', b.dataset.tab === tab);
     }
-    if (tab === 'playlists' && !state.playlists && !state.playlistsError) loadPlaylists();
+    if (tab === 'playlists' && !state.playlists && !state.playlistsError && !state.playlistsLoading) loadPlaylists();
     renderBody();
     body.scrollTop = 0;
 }
@@ -254,8 +264,10 @@ function renderPlaylists() {
             <button type="button" data-act="reload-playlists">重试</button>`;
     }
     if (!state.playlists) return '<div class="nep-hint">加载中…</div>';
-    if (!state.playlists.length) return '<div class="nep-hint">没有歌单</div>';
-    return state.playlists.map((p, i) => `<div class="nep-row" data-act="open-playlist" data-i="${i}">
+    const head = `<div class="nep-bar"><div class="nep-hint" style="flex:1;margin:0">${state.playlists.length} 个歌单</div>
+        ${refreshButton('refresh-playlists')}</div>`;
+    if (!state.playlists.length) return `${head}<div class="nep-hint">没有歌单</div>`;
+    return head + state.playlists.map((p, i) => `<div class="nep-row" data-act="open-playlist" data-i="${i}">
         ${p.cover ? `<img loading="lazy" src="${esc(p.cover)}?param=80y80" alt="">` : '<img alt="">'}
         <div class="nep-row-main"><div class="nep-row-title">${esc(p.name)}</div>
         <div class="nep-row-sub">${p.count} 首${p.mine ? '' : ' · 收藏'}</div></div></div>`).join('');
@@ -265,7 +277,8 @@ function renderPlaylistTracks() {
     const pl = state.playlist;
     let html = `<div class="nep-bar">
         <button type="button" class="fa-solid fa-chevron-left" data-act="back" title="返回"></button>
-        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pl.meta.name)}（${pl.meta.count}）</div></div>
+        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pl.meta.name)}（${pl.meta.count}）</div>
+        ${refreshButton('refresh-playlist')}</div>
         <div class="nep-bar"><button type="button" data-act="play-all" style="flex:1">▶ 播放全部</button>
         <button type="button" data-act="shuffle-all" style="flex:1">随机播放</button></div>`;
     if (pl.error) html += `<div class="nep-error">${esc(pl.error)}</div>`;
@@ -273,6 +286,12 @@ function renderPlaylistTracks() {
     if (pl.loading) html += '<div class="nep-hint">加载中…</div>';
     else if (pl.hasMore) html += '<button type="button" data-act="playlist-more" style="width:100%;margin-top:8px">加载更多</button>';
     return html;
+}
+
+function refreshButton(act) {
+    const busy = state.playlistsLoading || !!state.playlist?.loading;
+    return `<button type="button" data-act="${act}" ${busy ? 'disabled' : ''} title="跳过缓存，从网易云重新获取">
+        <i class="fa-solid fa-rotate-right"></i> ${busy ? '刷新中…' : '刷新'}</button>`;
 }
 
 function renderQueue() {
@@ -335,6 +354,13 @@ function renderSettings() {
     }).join('\n');
     return `
         <div class="nep-section"><h4>网易云账号</h4>${renderAccount()}</div>
+        <div class="nep-section"><h4>常驻入口</h4>
+            <label class="nep-check">显示
+            <select data-setting="entry" data-kind="text">${[['float', '悬浮按钮（可拖动）'], ['bar', '输入框上方的迷你播放条'], ['off', '关闭']]
+                .map(([v, label]) => `<option value="${v}" ${settings.entry === v ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+            <div class="nep-hint">关闭后只能从魔法棒菜单打开；正在播放时输入框上方仍会显示迷你播放条。悬浮按钮按住可以拖到任意位置。</div>
+            ${settings.entry === 'float' ? '<button type="button" data-act="float-reset">悬浮按钮回到默认位置</button>' : ''}
+        </div>
         <div class="nep-section"><h4>播放</h4>
             <label class="nep-check"><input type="checkbox" data-setting="skipTrial" ${settings.skipTrial ? 'checked' : ''}>跳过只有试听片段的歌</label>
             <label class="nep-check"><input type="checkbox" data-setting="autoResume" ${settings.autoResume ? 'checked' : ''}>生成完成前后音乐被提示音打断时，自动接着放</label>
@@ -353,7 +379,7 @@ function renderSettings() {
             <button type="button" data-act="log-clear">清空</button></div>
         </div>
         <div class="nep-section"><h4>关闭播放器</h4>
-            <div class="nep-hint">停止播放、清空队列，迷你播放条也会隐藏。登录状态保留。</div>
+            <div class="nep-hint">停止播放、清空队列。常驻入口设为「关闭」时，迷你播放条也会隐藏。登录状态保留。</div>
             <button type="button" data-act="shutdown">停止并关闭</button>
         </div>`;
 }
@@ -382,15 +408,56 @@ async function doSearch(more = false) {
     if (state.tab === 'search') renderBody();
 }
 
-async function loadPlaylists() {
-    state.playlistsError = '';
+/**
+ * 取歌单列表。fresh：让服务端跳过缓存直接问网易云。
+ * quiet：后台检查用，失败时不打扰（除非正对着空白的歌单页）。
+ * reloadOpen：不管有没有变化，都重新拉正打开的歌单。
+ */
+async function loadPlaylists({ fresh = false, quiet = false, reloadOpen = false } = {}) {
+    if (state.playlistsLoading) return false;
+    state.playlistsLoading = true;
+    if (!quiet) state.playlistsError = '';
+    if (state.tab === 'playlists' && !quiet) renderBody();
+    let ok = false;
     try {
-        const data = await api('playlists');
-        state.playlists = data.playlists;
+        const data = await api('playlists', fresh ? { fresh: true } : {});
+        if (fresh) playlistsCheckedAt = Date.now();
+        state.playlistsError = '';
+        applyPlaylists(data.playlists, reloadOpen);
+        ok = true;
     } catch (error) {
-        state.playlistsError = error.needLogin ? '需要先登录网易云（在「账号/设置」里扫码）' : error.message;
+        if (!quiet || (!state.playlists && state.tab === 'playlists')) {
+            state.playlistsError = error.needLogin ? '需要先登录网易云（在「账号/设置」里扫码）' : error.message;
+        }
     }
+    state.playlistsLoading = false;
     if (state.tab === 'playlists') renderBody();
+    return ok;
+}
+
+/** 换上新的歌单列表；正打开的歌单如果曲目数或更新时间变了，就重新拉它的歌。 */
+function applyPlaylists(list, reloadOpen = false) {
+    state.playlists = list;
+    const pl = state.playlist;
+    const meta = pl && list.find(p => p.id === pl.meta.id);
+    if (!meta) return;
+    const changed = meta.count !== pl.meta.count || meta.updated !== pl.meta.updated;
+    pl.meta = meta;
+    if (changed || reloadOpen) reloadPlaylistTracks();
+}
+
+function autoCheckPlaylists() {
+    if (state.account && !state.account.loggedIn) return;
+    if (Date.now() - playlistsCheckedAt < AUTO_CHECK_INTERVAL) return;
+    playlistsCheckedAt = Date.now();
+    loadPlaylists({ fresh: true, quiet: true });
+}
+
+function reloadPlaylistTracks() {
+    const meta = state.playlist?.meta;
+    if (!meta) return;
+    state.playlist = { meta, tracks: [], hasMore: true, loading: false, error: '', fresh: true };
+    loadPlaylistPage();
 }
 
 async function loadPlaylistPage() {
@@ -400,7 +467,8 @@ async function loadPlaylistPage() {
     pl.error = '';
     renderBody();
     try {
-        const data = await api('playlist/tracks', { id: pl.meta.id, offset: pl.tracks.length, limit: 200 });
+        const fresh = pl.fresh && !pl.tracks.length;
+        const data = await api('playlist/tracks', { id: pl.meta.id, offset: pl.tracks.length, limit: 200, ...(fresh ? { fresh: true } : {}) });
         if (state.playlist !== pl) return;
         pl.tracks.push(...data.tracks);
         pl.hasMore = data.hasMore && data.tracks.length > 0;
@@ -521,8 +589,13 @@ function onBodySubmit(e) {
 function onBodyChange(e) {
     const key = e.target.dataset?.setting;
     if (!key) return;
-    settings[key] = e.target.type === 'checkbox' ? e.target.checked : Number(e.target.value);
+    const { type, value, checked, dataset } = e.target;
+    settings[key] = type === 'checkbox' ? checked : (dataset.kind === 'text' ? value : Number(value));
     saveSettings();
+    if (key === 'entry') {
+        miniBar.apply();
+        renderBody();
+    }
 }
 
 function onBodyClick(e) {
@@ -543,7 +616,18 @@ function onBodyClick(e) {
         case 'reload-playlists':
             state.playlists = null;
             renderBody();
-            return void loadPlaylists();
+            return void loadPlaylists({ fresh: true });
+        case 'refresh-playlists':
+            loadPlaylists({ fresh: true }).then((ok) => {
+                if (ok) globalThis.toastr?.success('歌单已刷新', '', { timeOut: 1500 });
+            });
+            return;
+        case 'refresh-playlist':
+            // 先刷新列表拿到最新曲目数，再从头拉这个歌单；列表刷新失败也照样重拉曲目
+            loadPlaylists({ fresh: true, reloadOpen: true }).then((ok) => {
+                if (!ok) reloadPlaylistTracks();
+            });
+            return;
         case 'open-playlist': {
             const meta = state.playlists?.[i];
             if (!meta) return;
@@ -589,6 +673,9 @@ function onBodyClick(e) {
                     renderBody();
                 }
             });
+            return;
+        case 'float-reset':
+            resetFloatPosition();
             return;
         case 'log-refresh': return void renderBody();
         case 'log-clear':
