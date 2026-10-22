@@ -33,6 +33,8 @@ let lastSrcSetAt = 0;
 let lastPrefetchAt = 0;
 let autoResumes = [];
 let history = [];
+let silentMode = false; // 「静音播放」：不放歌，只循环静音保持页面不被挂起
+let silentActive = false; // 静音播放是不是在放（unlock() 放的那段静音不算）
 const listeners = new Set();
 
 // ---------- 对外接口 ----------
@@ -53,11 +55,63 @@ export function getState() {
         currentTime: current && !isSilence() ? audio.currentTime : savedPosition,
         duration: current && !isSilence() ? audio.duration : 0,
         trial: !!current?.info?.trial,
+        silent: silentMode,
+        silentPlaying: silentMode && silentActive && isSilence() && !audio.paused,
     };
 }
 
 export function isPlaying() {
     return !!audio && !!current && !isSilence() && !audio.paused;
+}
+
+export function isSilentMode() {
+    return silentMode;
+}
+
+/** 开始静音播放：停掉正在放的歌（记住位置），改为循环播放静音。 */
+export function startSilent() {
+    unlock();
+    userPaused = false;
+    silentActive = true;
+    if (!silentMode) {
+        savePosition(true);
+        playToken++;
+        current = null;
+        silentMode = true;
+        store.set(KEYS.silent, true);
+        log('静音播放', '开始');
+    }
+    // 正在放歌时换成静音，浏览器会先发一次 pause，下面按换 src 忽略掉
+    if (!isSilence()) lastSrcSetAt = Date.now();
+    playSilence();
+    miniBar.set({ title: '静音播放', artist: '保持页面不被挂起', playing: true, needTap: false, note: '' });
+    updateMetadata();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    emit();
+}
+
+/** 结束静音播放；队列里有歌就从刚才的位置接着放。 */
+export function stopSilent() {
+    if (!silentMode) return;
+    leaveSilent();
+    log('静音播放', '结束');
+    if (state.queue.length) {
+        startIndex(Math.max(0, state.index), { startAt: savedPosition, reason: '结束静音播放' });
+        return;
+    }
+    audio.pause();
+    miniBar.set({ title: '', artist: '', playing: false, note: '' });
+    if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = null;
+        navigator.mediaSession.playbackState = 'none';
+    }
+    emit();
+}
+
+function leaveSilent() {
+    silentMode = false;
+    silentActive = false;
+    store.remove(KEYS.silent);
 }
 
 /** 用一组歌替换队列并从 startIndex 开始播放。 */
@@ -109,7 +163,7 @@ export function playIndex(i) {
 }
 
 export function toggle() {
-    if (isPlaying()) {
+    if (isPlaying() || getState().silentPlaying) {
         pause();
     } else {
         resume();
@@ -118,14 +172,20 @@ export function toggle() {
 
 export function pause() {
     userPaused = true;
+    silentActive = false;
     if (audio && !audio.paused) audio.pause();
     if (isSilence()) audio.pause();
     savePosition(true);
     miniBar.set({ playing: false });
+    if (silentMode && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     emit();
 }
 
 export function resume() {
+    if (silentMode) {
+        startSilent();
+        return;
+    }
     unlock();
     userPaused = false;
     if (!state.queue.length) {
@@ -188,6 +248,7 @@ export function stopAndClear() {
         audio.load();
     }
     current = null;
+    leaveSilent();
     state.queue = [];
     state.index = -1;
     state.source = null;
@@ -213,6 +274,8 @@ async function startIndex(i, { startAt = 0, reason = '' } = {}) {
     const token = ++playToken;
     const track = state.queue[i];
     if (!track) return;
+    // 点了歌、上一首/下一首，就退出静音播放
+    if (silentMode) leaveSilent();
     userPaused = false;
     state.index = i;
     savedPosition = startAt;
@@ -406,6 +469,12 @@ function bindAudio() {
     });
 
     audio.addEventListener('playing', () => {
+        if (silentMode && isSilence()) {
+            miniBar.set({ playing: true, needTap: false });
+            if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+            emit();
+            return;
+        }
         if (isSilence() || !current) return;
         failStreak = 0;
         userPaused = false;
@@ -417,6 +486,16 @@ function bindAudio() {
     });
 
     audio.addEventListener('pause', () => {
+        if (silentMode && isSilence()) {
+            if (Date.now() - lastSrcSetAt < 1000) return;
+            miniBar.set({ playing: false });
+            emit();
+            if (!userPaused) {
+                log('暂停', '静音播放被系统或其他声音打断');
+                maybeAutoResume();
+            }
+            return;
+        }
         // 换 src 时浏览器也可能发 pause，忽略
         if (isSilence() || !current || Date.now() - lastSrcSetAt < 1000) return;
         miniBar.set({ playing: false });
@@ -485,7 +564,8 @@ function maybeAutoResume() {
     if (autoResumes.length >= 2) return;
     autoResumes.push(now);
     setTimeout(() => {
-        if (audio.paused && !userPaused && current && !isSilence()) {
+        if (!audio.paused || userPaused) return;
+        if (silentMode ? isSilence() : (current && !isSilence())) {
             log('自动恢复播放');
             audio.play().catch(onPlayRejected);
         }
@@ -495,8 +575,17 @@ function maybeAutoResume() {
 // ---------- Media Session（锁屏 / 控制中心） ----------
 
 function updateMetadata(track = state.queue[state.index]) {
-    if (!('mediaSession' in navigator) || !track || typeof MediaMetadata === 'undefined') return;
+    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return;
     const label = gen.label;
+    if (silentMode) {
+        try {
+            navigator.mediaSession.metadata = new MediaMetadata({ title: '静音播放', artist: label || '酒馆', album: '' });
+        } catch (error) {
+            console.warn('[netease-player] metadata', error);
+        }
+        return;
+    }
+    if (!track) return;
     const artwork = track.pic
         ? [{ src: `${track.pic}?param=512y512`, sizes: '512x512', type: 'image/jpeg' }]
         : [];
@@ -620,12 +709,15 @@ export function init() {
     bindAudio();
     bindMediaSession();
     gen.listeners.add(() => updateMetadata(current?.track));
+    silentMode = !!store.get(KEYS.silent);
     const persist = () => savePosition(true);
     window.addEventListener('pagehide', persist);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') persist();
     });
-    if (state.queue.length && !isUnlocked()) {
+    if (silentMode && !isUnlocked()) {
+        miniBar.set({ title: '静音播放', artist: '', needTap: true });
+    } else if (state.queue.length && !isUnlocked()) {
         const track = state.queue[state.index];
         miniBar.set({ title: track?.name || '', artist: track?.ar || '', needTap: true });
     }

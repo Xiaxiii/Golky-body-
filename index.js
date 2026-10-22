@@ -8,6 +8,7 @@ const KEYS = {
     queue: 'nep:v1:queue',
     settings: 'nep:v1:settings',
     log: 'nep:v1:log',
+    silent: 'nep:v1:silent',
     floatPos: 'nep:v1:float-pos',
 };
 const DEFAULT_SETTINGS = {
@@ -53,13 +54,15 @@ export function saveSettings() {
 
 // ---------- 事件日志（用来在 iPhone 上确认事件到底有没有触发） ----------
 
-const logEntries = store.get(KEYS.log, []) || [];
+// 只留最近 10 条
+const LOG_LIMIT = 10;
+const logEntries = (store.get(KEYS.log, []) || []).slice(-LOG_LIMIT);
 let logSaveTimer = null;
 
 export function log(name, detail = '') {
     logEntries.push({ t: Date.now(), name, detail: String(detail || '') });
-    if (logEntries.length > 60) {
-        logEntries.splice(0, logEntries.length - 60);
+    if (logEntries.length > LOG_LIMIT) {
+        logEntries.splice(0, logEntries.length - LOG_LIMIT);
     }
     if (!logSaveTimer) {
         logSaveTimer = setTimeout(() => {
@@ -144,7 +147,7 @@ export function isSilence() {
     return !!audio && audio.dataset.silent === '1';
 }
 
-/** 播放静音占位：切歌取地址的空档里保持页面不被挂起。 */
+/** 播放静音：切歌取地址的空档里、或者开着「静音播放」时，保持页面不被挂起。 */
 export function playSilence() {
     const a = getAudio();
     if (isSilence() && !a.paused) return;
@@ -649,6 +652,12 @@ function addMenuItem() {
 }
 
 function restoreMiniBar() {
+    if (store.get(KEYS.silent)) {
+        log('页面加载', '上次在静音播放');
+        miniBar.set({ title: '静音播放', artist: '', needTap: true, note: '点「继续播放」接着静音播放' });
+        miniBar.show();
+        return;
+    }
     const now = store.get(KEYS.now);
     if (!now || !now.title) return;
     log('页面加载', `上次保存于 ${Math.round((Date.now() - (now.savedAt || 0)) / 60000)} 分钟前`);

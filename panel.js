@@ -27,6 +27,7 @@ border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:6px 8px;
 .nep-progress{display:flex;align-items:center;gap:8px;padding:0 12px;font-size:.78em;opacity:.8;font-variant-numeric:tabular-nums}
 .nep-progress input{flex:1;accent-color:var(--SmartThemeQuoteColor)}
 .nep-controls{display:flex;justify-content:center;align-items:center;gap:6px;padding:2px 8px 6px}
+.nep-controls .nep-silent.nep-on{color:var(--SmartThemeQuoteColor)}
 .nep-tabs{display:flex;border-top:1px solid var(--SmartThemeBorderColor);border-bottom:1px solid var(--SmartThemeBorderColor)}
 .nep-tabs button{flex:1;border:0!important;border-radius:0!important;padding:9px 0!important;opacity:.65}
 .nep-tabs button.nep-active{opacity:1;box-shadow:inset 0 -2px 0 var(--SmartThemeQuoteColor)}
@@ -190,6 +191,7 @@ function build() {
             <button type="button" class="nep-icon fa-solid fa-play nep-toggle" title="播放/暂停"></button>
             <button type="button" class="nep-icon fa-solid fa-forward-step nep-next" title="下一首"></button>
             <button type="button" class="nep-icon fa-solid fa-list nep-goqueue" title="播放队列"></button>
+            <button type="button" class="nep-icon fa-solid fa-volume-xmark nep-silent" title="静音播放"></button>
         </div>
         <div class="nep-tabs">
             <button type="button" data-tab="search">搜索</button>
@@ -206,6 +208,10 @@ function build() {
     root.querySelector('.nep-prev').addEventListener('click', () => engine.prev());
     root.querySelector('.nep-next').addEventListener('click', () => engine.next());
     root.querySelector('.nep-goqueue').addEventListener('click', () => switchTab('queue'));
+    root.querySelector('.nep-silent').addEventListener('click', () => {
+        if (engine.isSilentMode()) engine.stopSilent();
+        else engine.startSilent();
+    });
     root.querySelector('.nep-mode').addEventListener('click', () => {
         const order = ['loop', 'shuffle', 'one'];
         engine.setMode(order[(order.indexOf(engine.getState().mode) + 1) % order.length]);
@@ -275,11 +281,15 @@ function switchTab(tab) {
 function renderNow() {
     if (!root || root.hidden) return;
     const s = engine.getState();
-    const t = s.track;
-    root.querySelector('.nep-now-title').textContent = t ? t.name : '还没有播放';
+    const t = s.silent ? null : s.track;
+    root.querySelector('.nep-now-title').textContent = s.silent ? '静音播放' : (t ? t.name : '还没有播放');
     const sub = root.querySelector('.nep-now-sub');
-    sub.textContent = gen.label || (t ? `${t.ar}${s.trial ? '（试听片段）' : ''}` : '去搜歌或打开歌单');
+    const idle = s.silent ? '保持页面不被挂起，再点 🔇 回到音乐' : '去搜歌或打开歌单';
+    sub.textContent = gen.label || (t ? `${t.ar}${s.trial ? '（试听片段）' : ''}` : idle);
     sub.classList.toggle('nep-gen', !!gen.label);
+    const silentBtn = root.querySelector('.nep-silent');
+    silentBtn.classList.toggle('nep-on', s.silent);
+    silentBtn.title = s.silent ? '结束静音播放' : '静音播放';
     const cover = root.querySelector('.nep-cover');
     const pic = t?.pic ? `${t.pic}?param=120y120` : '';
     if (cover.dataset.src !== pic) {
@@ -288,8 +298,9 @@ function renderNow() {
         else cover.removeAttribute('src');
     }
     const toggle = root.querySelector('.nep-toggle');
-    toggle.classList.toggle('fa-play', !s.playing);
-    toggle.classList.toggle('fa-pause', s.playing);
+    const playing = s.playing || s.silentPlaying;
+    toggle.classList.toggle('fa-play', !playing);
+    toggle.classList.toggle('fa-pause', playing);
     const mode = root.querySelector('.nep-mode');
     const modes = { loop: ['fa-repeat', '列表循环'], shuffle: ['fa-shuffle', '随机播放'], one: ['fa-1', '单曲循环'] };
     mode.className = `nep-icon nep-mode fa-solid ${modes[s.mode][0]}`;
@@ -462,6 +473,7 @@ function renderSettings() {
         <div class="nep-section"><h4>播放</h4>
             <label class="nep-check"><input type="checkbox" data-setting="skipTrial" ${settings.skipTrial ? 'checked' : ''}>跳过只有试听片段的歌</label>
             <label class="nep-check"><input type="checkbox" data-setting="autoResume" ${settings.autoResume ? 'checked' : ''}>生成完成前后音乐被提示音打断时，自动接着放</label>
+            <div class="nep-hint">不想听歌时点播放键旁边的 🔇「静音播放」：不出声，照样保持页面不被挂起，锁屏也照样显示生成状态。再点一次回到刚才的歌。</div>
         </div>
         <div class="nep-section"><h4>锁屏生成状态</h4>
             <label class="nep-check">「回复已完成」显示
@@ -471,7 +483,7 @@ function renderSettings() {
         </div>
         <div class="nep-section"><h4>诊断</h4>
             <div class="nep-hint">Media Session：${ms}</div>
-            <div class="nep-hint">事件日志（最新在上；用来确认生成事件有没有触发、音乐有没有被打断）：</div>
+            <div class="nep-hint">事件日志（只留最近 10 条，最新在上；用来确认生成事件有没有触发、音乐有没有被打断）：</div>
             <div class="nep-log">${esc(log || '（空）')}</div>
             <div class="nep-bar" style="margin-top:6px"><button type="button" data-act="log-refresh">刷新</button>
             <button type="button" data-act="log-clear">清空</button></div>
